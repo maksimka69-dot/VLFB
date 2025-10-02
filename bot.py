@@ -13,14 +13,12 @@ from telegram.ext import (
 )
 import sqlite3
 import asyncio
-import threading
 
 # --- Экранирование для MarkdownV2 ---
 def escape_md(text: str) -> str:
-    """Экранирует спецсимволы для MarkdownV2 в Telegram."""
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])', r'\\\1', text)
 
-# --- Настройка логирования ---
+# --- Логирование ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -36,14 +34,15 @@ if not TOKEN:
 # --- Создаём Flask-приложение ---
 app = Flask(__name__)
 
-# --- Инициализация Telegram Application ---
-telegram_app = Application.builder().token(TOKEN).build()
+# --- Глобальный event loop и инициализированный Application ---
+telegram_app = None
+bot_loop = None
+
 # --- Инициализация базы данных ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # Браки
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS marriages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,7 +59,6 @@ def init_db():
         )
     ''')
 
-    # Дети
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS children (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,7 +71,6 @@ def init_db():
         )
     ''')
 
-    # Предложения (анти-спам)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS proposals (
             user_id INTEGER,
@@ -83,7 +80,6 @@ def init_db():
         )
     ''')
 
-    # Пользователи (работа)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -95,7 +91,6 @@ def init_db():
         )
     ''')
 
-    # Квесты
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS quests (
             user_id INTEGER,
@@ -108,7 +103,6 @@ def init_db():
         )
     ''')
 
-    # Магазин
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS shop_items (
             id INTEGER PRIMARY KEY,
@@ -119,7 +113,6 @@ def init_db():
         )
     ''')
 
-    # Заполнение магазина
     cursor.execute('SELECT COUNT(*) FROM shop_items')
     if cursor.fetchone()[0] == 0:
         items = [
@@ -133,7 +126,7 @@ def init_db():
         ]
         cursor.executemany('INSERT INTO shop_items (name, type, price, description) VALUES (?, ?, ?, ?)', items)
 
-    # Проверка колонки birthday и family_level
+    # Проверка колонок
     cursor.execute("PRAGMA table_info(children)")
     cols = [c[1] for c in cursor.fetchall()]
     if 'birthday' not in cols:
@@ -900,63 +893,85 @@ async def divorce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(escape_md("💔 Вы развелись..."), parse_mode='MarkdownV2')
 
 # --- Регистрация обработчиков ---
-def register_handlers():
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("marry", marry))
-    telegram_app.add_handler(CommandHandler("work", work))
-    telegram_app.add_handler(CommandHandler("quests", quests))
-    telegram_app.add_handler(CommandHandler("shop", shop))
-    telegram_app.add_handler(CommandHandler("buy", buy))
-    telegram_app.add_handler(CommandHandler("profile", profile))
-    telegram_app.add_handler(CommandHandler("daily", daily))
-    telegram_app.add_handler(CommandHandler("casino", casino))
-    telegram_app.add_handler(CommandHandler("gift", gift))
-    telegram_app.add_handler(CommandHandler("child", child))
-    telegram_app.add_handler(CommandHandler("divorce", divorce_cmd))
-    telegram_app.add_handler(CommandHandler("reset", reset))
+def register_handlers(app_instance):
+    app_instance.add_handler(CommandHandler("start", start))
+    app_instance.add_handler(CommandHandler("marry", marry))
+    app_instance.add_handler(CommandHandler("work", work))
+    app_instance.add_handler(CommandHandler("quests", quests))
+    app_instance.add_handler(CommandHandler("shop", shop))
+    app_instance.add_handler(CommandHandler("buy", buy))
+    app_instance.add_handler(CommandHandler("profile", profile))
+    app_instance.add_handler(CommandHandler("daily", daily))
+    app_instance.add_handler(CommandHandler("casino", casino))
+    app_instance.add_handler(CommandHandler("gift", gift))
+    app_instance.add_handler(CommandHandler("child", child))
+    app_instance.add_handler(CommandHandler("divorce", divorce_cmd))
+    app_instance.add_handler(CommandHandler("reset", reset))
 
-    telegram_app.add_handler(CallbackQueryHandler(marry_callback, pattern=r"^marry_"))
-    telegram_app.add_handler(CallbackQueryHandler(reset_callback, pattern=r"^reset_"))
+    app_instance.add_handler(CallbackQueryHandler(marry_callback, pattern=r"^marry_"))
+    app_instance.add_handler(CallbackQueryHandler(reset_callback, pattern=r"^reset_"))
 
-# --- Webhook endpoint (обрабатываем сразу!) ---
+
+# --- Webhook endpoint ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # Получаем JSON от Telegram
+    global telegram_app
     json_data = request.get_json()
     if json_data is None:
         return 'OK', 200
 
-    # Преобразуем в объект Update
     update = Update.de_json(json_data, telegram_app.bot)
 
-    # Обрабатываем обновление СРАЗУ (синхронно)
-    asyncio.run(telegram_app.process_update(update))
+    # Выполняем асинхронную задачу в уже запущенном loop'е
+    asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), bot_loop)
 
     return 'OK', 200
 
-# --- Health check ---
+
 @app.route('/', methods=['GET'])
 def home():
     return 'Marriage Bot is running on Render! ✅', 200
 
+
 # --- Установка webhook ---
-def set_webhook():
+def set_webhook_sync():
     hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
     if not hostname:
-        raise ValueError("RENDER_EXTERNAL_HOSTNAME не установлен! Запуск возможен только на Render.")
+        logger.warning("RENDER_EXTERNAL_HOSTNAME не установлен. Webhook не будет установлен.")
+        return
 
     webhook_url = f"https://{hostname}/webhook"
     logger.info(f"Setting webhook to: {webhook_url}")
-    asyncio.run(telegram_app.bot.set_webhook(url=webhook_url))
+    # Выполняем синхронно через loop
+    future = asyncio.run_coroutine_threadsafe(telegram_app.bot.set_webhook(url=webhook_url), bot_loop)
+    future.result()  # Ждём завершения
 
-# --- Запуск приложения ---
-if __name__ == '__main__':
+
+# --- Основная функция запуска ---
+def main():
+    global telegram_app, bot_loop
+
+    # Создаём новый event loop и делаем его текущим
+    bot_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(bot_loop)
+
+    # Создаём и инициализируем Application
+    telegram_app = Application.builder().token(TOKEN).build()
+    bot_loop.run_until_complete(telegram_app.initialize())
+
+    # Регистрируем обработчики
+    register_handlers(telegram_app)
+
+    # Инициализация БД
     init_db()
-    register_handlers()
 
     # Устанавливаем webhook
-    set_webhook()
+    set_webhook_sync()
 
-    # Запускаем Flask
+    # Запускаем Flask в основном потоке (Flask не асинхронный!)
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+
+
+if __name__ == '__main__':
+    main()
