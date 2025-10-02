@@ -1,5 +1,5 @@
-import os
 import logging
+import os
 import random
 import re
 from datetime import datetime, timedelta
@@ -12,7 +12,8 @@ from telegram.ext import (
     ContextTypes
 )
 import sqlite3
-import asyncio  # ← добавлено для set_webhook
+import asyncio
+import threading
 
 # --- Экранирование для MarkdownV2 ---
 def escape_md(text: str) -> str:
@@ -28,18 +29,15 @@ logger = logging.getLogger(__name__)
 
 # --- Конфигурация ---
 DB_NAME = 'marriage_bot.db'
-TOKEN = "8471148948:AAEoMjY0C79NjisPoz6mJRhCabntCI-SIm8"  # ← только для локального теста!
-# TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # ← Будет задан в Render
-#
-# if not TOKEN:
-#     raise ValueError("TELEGRAM_BOT_TOKEN не установлен!")
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN не установлен!")
 
 # --- Создаём Flask-приложение ---
 app = Flask(__name__)
 
-# --- Инициализация Telegram Application (без запуска polling) ---
+# --- Инициализация Telegram Application ---
 telegram_app = Application.builder().token(TOKEN).build()
-
 # --- Инициализация базы данных ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -920,34 +918,51 @@ def register_handlers():
     telegram_app.add_handler(CallbackQueryHandler(marry_callback, pattern=r"^marry_"))
     telegram_app.add_handler(CallbackQueryHandler(reset_callback, pattern=r"^reset_"))
 
-# --- Webhook endpoint ---
-@app.route(f'/webhook/{TOKEN}', methods=['POST'])
+# --- Webhook endpoint (БЕЗ токена в URL!) ---
+@app.route('/webhook', methods=['POST'])
 def webhook():
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
     telegram_app.update_queue.put_nowait(update)
     return 'OK', 200
 
-# --- Health check (Render будет пинговать /) ---
+# --- Health check ---
 @app.route('/', methods=['GET'])
 def home():
     return 'Marriage Bot is running on Render! ✅', 200
 
-# --- Установка webhook при запуске сервера ---
+# --- Установка webhook (БЕЗ токена в URL!) ---
 def set_webhook():
     hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
     if not hostname:
-        # Для локального тестирования раскомментируйте и укажите ваш ngrok URL:
-        # hostname = "abcd-123-45-67.ngrok.io"  # ← ЗАМЕНИТЕ НА ВАШ NGROK URL!
-        raise ValueError("RENDER_EXTERNAL_HOSTNAME не установлен! Для локального запуска задайте hostname вручную.")
+        raise ValueError("RENDER_EXTERNAL_HOSTNAME не установлен! Запуск возможен только на Render.")
 
-    webhook_url = f"https://{hostname}/webhook/{TOKEN}"
+    webhook_url = f"https://{hostname}/webhook"
     logger.info(f"Setting webhook to: {webhook_url}")
     asyncio.run(telegram_app.bot.set_webhook(url=webhook_url))
+
+# --- Фоновый запуск telegram_app ---
+def run_telegram_app():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(telegram_app.initialize())
+        loop.run_until_complete(telegram_app.start())
+        loop.run_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.run_until_complete(telegram_app.stop())
+        loop.run_until_complete(telegram_app.shutdown())
+        loop.close()
 
 # --- Запуск приложения ---
 if __name__ == '__main__':
     init_db()
     register_handlers()
+
+    # Запускаем Telegram-приложение в фоновом потоке
+    telegram_thread = threading.Thread(target=run_telegram_app, daemon=True)
+    telegram_thread.start()
 
     # Устанавливаем webhook
     set_webhook()
