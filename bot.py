@@ -14,6 +14,36 @@ from telegram.ext import (
 import sqlite3
 import asyncio
 
+# --- Настройки ---
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+DB_NAME = 'marriage_bot.db'
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN не установлен!")
+
+app = Flask(__name__)
+
+# --- ГЛОБАЛЬНЫЙ telegram_app и loop ---
+telegram_app = None
+bot_loop = asyncio.new_event_loop()
+asyncio.set_event_loop(bot_loop)
+
+# --- СОЗДАЁМ И ИНИЦИАЛИЗИРУЕМ telegram_app СРАЗУ ---
+def init_telegram_app():
+    global telegram_app
+    telegram_app = Application.builder().token(TOKEN).build()
+    bot_loop.run_until_complete(telegram_app.initialize())
+    logger.info("✅ Telegram Application успешно инициализирован!")
+
+# --- Вызываем инициализацию СРАЗУ при импорте/старте ---
+init_telegram_app()
+
+
 # --- Экранирование для MarkdownV2 ---
 def escape_md(text: str) -> str:
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])', r'\\\1', text)
@@ -25,11 +55,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Конфигурация ---
-DB_NAME = 'marriage_bot.db'
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN не установлен!")
 
 # --- Создаём Flask-приложение ---
 app = Flask(__name__)
@@ -892,86 +917,68 @@ async def divorce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     divorce(user_id, chat_id)
     await update.message.reply_text(escape_md("💔 Вы развелись..."), parse_mode='MarkdownV2')
 
+
 # --- Регистрация обработчиков ---
-def register_handlers(app_instance):
-    app_instance.add_handler(CommandHandler("start", start))
-    app_instance.add_handler(CommandHandler("marry", marry))
-    app_instance.add_handler(CommandHandler("work", work))
-    app_instance.add_handler(CommandHandler("quests", quests))
-    app_instance.add_handler(CommandHandler("shop", shop))
-    app_instance.add_handler(CommandHandler("buy", buy))
-    app_instance.add_handler(CommandHandler("profile", profile))
-    app_instance.add_handler(CommandHandler("daily", daily))
-    app_instance.add_handler(CommandHandler("casino", casino))
-    app_instance.add_handler(CommandHandler("gift", gift))
-    app_instance.add_handler(CommandHandler("child", child))
-    app_instance.add_handler(CommandHandler("divorce", divorce_cmd))
-    app_instance.add_handler(CommandHandler("reset", reset))
+def register_handlers():
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("marry", marry))
+    telegram_app.add_handler(CommandHandler("work", work))
+    telegram_app.add_handler(CommandHandler("quests", quests))
+    telegram_app.add_handler(CommandHandler("shop", shop))
+    telegram_app.add_handler(CommandHandler("buy", buy))
+    telegram_app.add_handler(CommandHandler("profile", profile))
+    telegram_app.add_handler(CommandHandler("daily", daily))
+    telegram_app.add_handler(CommandHandler("casino", casino))
+    telegram_app.add_handler(CommandHandler("gift", gift))
+    telegram_app.add_handler(CommandHandler("child", child))
+    telegram_app.add_handler(CommandHandler("divorce", divorce_cmd))
+    telegram_app.add_handler(CommandHandler("reset", reset))
 
-    app_instance.add_handler(CallbackQueryHandler(marry_callback, pattern=r"^marry_"))
-    app_instance.add_handler(CallbackQueryHandler(reset_callback, pattern=r"^reset_"))
+    telegram_app.add_handler(CallbackQueryHandler(marry_callback, pattern=r"^marry_"))
+    telegram_app.add_handler(CallbackQueryHandler(reset_callback, pattern=r"^reset_"))
 
 
-# --- Webhook endpoint ---
+# --- Webhook ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    global telegram_app
     json_data = request.get_json()
-    if json_data is None:
+    if not json_data:
         return 'OK', 200
-
     update = Update.de_json(json_data, telegram_app.bot)
-
-    # Выполняем асинхронную задачу в уже запущенном loop'е
+    # Безопасно отправляем в уже запущенный loop
     asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), bot_loop)
-
     return 'OK', 200
 
 
 @app.route('/', methods=['GET'])
 def home():
-    return 'Marriage Bot is running on Render! ✅', 200
+    return '✅ Marriage Bot is running!', 200
 
 
 # --- Установка webhook ---
-def set_webhook_sync():
+def set_webhook():
     hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
-    if not hostname:
-        logger.warning("RENDER_EXTERNAL_HOSTNAME не установлен. Webhook не будет установлен.")
-        return
+    if hostname:
+        url = f"https://{hostname}/webhook"
+        logger.info(f"Setting webhook: {url}")
+        future = asyncio.run_coroutine_threadsafe(telegram_app.bot.set_webhook(url=url), bot_loop)
+        future.result()  # Ждём завершения
+        logger.info("✅ Webhook установлен!")
+    else:
+        logger.warning("⚠️ RENDER_EXTERNAL_HOSTNAME не задан — webhook не установлен.")
 
-    webhook_url = f"https://{hostname}/webhook"
-    logger.info(f"Setting webhook to: {webhook_url}")
-    # Выполняем синхронно через loop
-    future = asyncio.run_coroutine_threadsafe(telegram_app.bot.set_webhook(url=webhook_url), bot_loop)
-    future.result()  # Ждём завершения
 
-
-# --- Основная функция запуска ---
-def main():
-    global telegram_app, bot_loop
-
-    # Создаём новый event loop и делаем его текущим
-    bot_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(bot_loop)
-
-    # Создаём и инициализируем Application
-    telegram_app = Application.builder().token(TOKEN).build()
-    bot_loop.run_until_complete(telegram_app.initialize())
-
-    # Регистрируем обработчики
-    register_handlers(telegram_app)
-
-    # Инициализация БД
+# --- Запуск ---
+if __name__ == '__main__':
+    # 1. Инициализация БД
     init_db()
 
-    # Устанавливаем webhook
-    set_webhook_sync()
+    # 2. Регистрация команд
+    register_handlers()
 
-    # Запускаем Flask в основном потоке (Flask не асинхронный!)
+    # 3. Установка webhook
+    set_webhook()
+
+    # 4. Запуск Flask
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
-
-
-if __name__ == '__main__':
-    main()
