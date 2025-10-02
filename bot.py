@@ -30,38 +30,36 @@ app = Flask(__name__)
 
 # --- ГЛОБАЛЬНЫЙ telegram_app и loop ---
 telegram_app = None
-bot_loop = asyncio.new_event_loop()
-asyncio.set_event_loop(bot_loop)
+bot_loop = None
 
-# --- СОЗДАЁМ И ИНИЦИАЛИЗИРУЕМ telegram_app СРАЗУ ---
+
+# --- Инициализация Telegram приложения ---
 def init_telegram_app():
-    global telegram_app
-    telegram_app = Application.builder().token(TOKEN).build()
-    bot_loop.run_until_complete(telegram_app.initialize())
-    logger.info("✅ Telegram Application успешно инициализирован!")
+    global telegram_app, bot_loop
 
-# --- Вызываем инициализацию СРАЗУ при импорте/старте ---
-init_telegram_app()
+    # Создаем новый event loop
+    bot_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(bot_loop)
+
+    # Создаем и инициализируем приложение
+    telegram_app = Application.builder().token(TOKEN).build()
+
+    # Регистрируем обработчики
+    register_handlers()
+
+    # Инициализируем приложение
+    bot_loop.run_until_complete(telegram_app.initialize())
+
+    # Запускаем в фоновом режиме
+    bot_loop.run_until_complete(telegram_app.start())
+
+    logger.info("✅ Telegram Application успешно инициализирован и запущен!")
 
 
 # --- Экранирование для MarkdownV2 ---
 def escape_md(text: str) -> str:
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])', r'\\\1', text)
 
-# --- Логирование ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-
-# --- Создаём Flask-приложение ---
-app = Flask(__name__)
-
-# --- Глобальный event loop и инициализированный Application ---
-telegram_app = None
-bot_loop = None
 
 # --- Инициализация базы данных ---
 def init_db():
@@ -165,6 +163,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 # --- Получить имя пользователя ---
 async def get_name(update: Update, user_id: int) -> str:
     try:
@@ -172,6 +171,7 @@ async def get_name(update: Update, user_id: int) -> str:
         return user.full_name or user.username or f"Пользователь {user_id}"
     except:
         return f"Пользователь {user_id}"
+
 
 # --- Проверка брака ---
 def is_married(user_id: int, chat_id: int) -> tuple:
@@ -184,6 +184,7 @@ def is_married(user_id: int, chat_id: int) -> tuple:
     row = cursor.fetchone()
     conn.close()
     return row
+
 
 # --- Регистрация брака ---
 def register_marriage(user1: int, user2: int, chat_id: int):
@@ -203,13 +204,15 @@ def register_marriage(user1: int, user2: int, chat_id: int):
     finally:
         conn.close()
 
+
 # --- Расторжение брака ---
 def divorce(user_id: int, chat_id: int):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM marriages WHERE user1 = ? OR user2 = ?', (user_id, user_id))
+    cursor.execute('DELETE FROM marriages WHERE (user1 = ? OR user2 = ?) AND chat_id = ?', (user_id, user_id, chat_id))
     conn.commit()
     conn.close()
+
 
 # --- Обновить бюджет семьи ---
 def update_family_budget(user_id: int, chat_id: int, amount: int):
@@ -222,10 +225,12 @@ def update_family_budget(user_id: int, chat_id: int, amount: int):
     conn.commit()
     conn.close()
 
+
 # --- Получить бюджет ---
 def get_family_budget(user_id: int, chat_id: int) -> int:
     marriage = is_married(user_id, chat_id)
     return marriage[3] if marriage else 0
+
 
 # --- Можно ли предложить брак ---
 def can_propose(user_id: int, chat_id: int) -> bool:
@@ -239,6 +244,7 @@ def can_propose(user_id: int, chat_id: int) -> bool:
     last = datetime.fromisoformat(row[0])
     return datetime.now() - last > timedelta(seconds=300)
 
+
 # --- Обновить время предложения ---
 def update_proposal_time(user_id: int, chat_id: int):
     now = datetime.now().isoformat()
@@ -250,6 +256,7 @@ def update_proposal_time(user_id: int, chat_id: int):
     ''', (user_id, chat_id, now))
     conn.commit()
     conn.close()
+
 
 # --- Количество детей ---
 def count_children(user_id: int, chat_id: int) -> int:
@@ -264,6 +271,7 @@ def count_children(user_id: int, chat_id: int) -> int:
         WHERE ((parent1 = ? AND parent2 = ?) OR (parent1 = ? AND parent2 = ?)) AND chat_id = ?
     ''', (u1, u2, u2, u1, chat_id))
     return cursor.fetchone()[0]
+
 
 # --- Получить детей ---
 def get_children(user_id: int, chat_id: int):
@@ -281,6 +289,7 @@ def get_children(user_id: int, chat_id: int):
     conn.close()
     return rows
 
+
 # --- Уровни семьи ---
 FAMILY_LEVELS = [
     (0, "🌱 Новички"),
@@ -289,6 +298,7 @@ FAMILY_LEVELS = [
     (3000, "🏰 Успешная семья"),
     (5000, "👑 Аристократы")
 ]
+
 
 def get_family_level(budget: int, kids: int) -> tuple:
     score = budget + kids * 200
@@ -300,6 +310,7 @@ def get_family_level(budget: int, kids: int) -> tuple:
             title = name
     return level, title
 
+
 def update_family_level(user_id: int, chat_id: int) -> tuple:
     budget = get_family_budget(user_id, chat_id)
     kids = count_children(user_id, chat_id)
@@ -307,17 +318,20 @@ def update_family_level(user_id: int, chat_id: int) -> tuple:
 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('SELECT family_level FROM marriages WHERE (user1 = ? OR user2 = ?) AND chat_id = ?', (user_id, user_id, chat_id))
+    cursor.execute('SELECT family_level FROM marriages WHERE (user1 = ? OR user2 = ?) AND chat_id = ?',
+                   (user_id, user_id, chat_id))
     row = cursor.fetchone()
     old_level = row[0] if row else 1
 
     if new_level > old_level:
-        cursor.execute('UPDATE marriages SET family_level = ? WHERE (user1 = ? OR user2 = ?) AND chat_id = ?', (new_level, user_id, user_id, chat_id))
+        cursor.execute('UPDATE marriages SET family_level = ? WHERE (user1 = ? OR user2 = ?) AND chat_id = ?',
+                       (new_level, user_id, user_id, chat_id))
         conn.commit()
         conn.close()
         return new_level, title, True
     conn.close()
     return new_level, title, False
+
 
 # --- Достижения ---
 def get_achievements(user_id: int, chat_id: int) -> list:
@@ -341,7 +355,8 @@ def get_achievements(user_id: int, chat_id: int) -> list:
 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('SELECT quest_type FROM quests WHERE user_id = ? AND chat_id = ? AND completed = 1', (user_id, chat_id))
+    cursor.execute('SELECT quest_type FROM quests WHERE user_id = ? AND chat_id = ? AND completed = 1',
+                   (user_id, chat_id))
     completed = [row[0] for row in cursor.fetchall()]
     conn.close()
 
@@ -353,6 +368,7 @@ def get_achievements(user_id: int, chat_id: int) -> list:
         ach.append("❤️ Родитель: завёл ребёнка")
 
     return ach or ["💞 Молодожёны"]
+
 
 # --- РАБОТА И КВЕСТЫ ---
 JOBS = ["Безработный", "Кассир", "Повар", "Учитель", "Программист", "Блогер"]
@@ -369,13 +385,16 @@ QUESTS_INFO = {
     "be_married_30_days": {"desc": "Быть в браке 30 дней", "target": 30, "reward": 400}
 }
 
+
 def get_user(user_id: int, chat_id: int):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('SELECT job, work_streak, last_work, total_works FROM users WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+    cursor.execute('SELECT job, work_streak, last_work, total_works FROM users WHERE user_id = ? AND chat_id = ?',
+                   (user_id, chat_id))
     row = cursor.fetchone()
     conn.close()
     return row
+
 
 def create_user(user_id: int, chat_id: int):
     conn = sqlite3.connect(DB_NAME)
@@ -387,12 +406,14 @@ def create_user(user_id: int, chat_id: int):
     conn.commit()
     conn.close()
 
+
 def update_job(user_id: int, chat_id: int, job: str):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('UPDATE users SET job = ? WHERE user_id = ? AND chat_id = ?', (job, user_id, chat_id))
     conn.commit()
     conn.close()
+
 
 def update_work_stats(user_id: int, chat_id: int, streak: int, total: int):
     now = datetime.now().isoformat()
@@ -405,13 +426,16 @@ def update_work_stats(user_id: int, chat_id: int, streak: int, total: int):
     conn.commit()
     conn.close()
 
+
 def get_quest(user_id: int, chat_id: int, quest_type: str):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('SELECT progress, completed FROM quests WHERE user_id = ? AND chat_id = ? AND quest_type = ?', (user_id, chat_id, quest_type))
+    cursor.execute('SELECT progress, completed FROM quests WHERE user_id = ? AND chat_id = ? AND quest_type = ?',
+                   (user_id, chat_id, quest_type))
     row = cursor.fetchone()
     conn.close()
     return row
+
 
 def create_quest(user_id: int, chat_id: int, quest_type: str):
     quest = QUESTS_INFO.get(quest_type)
@@ -427,19 +451,25 @@ def create_quest(user_id: int, chat_id: int, quest_type: str):
     conn.commit()
     conn.close()
 
+
 def update_quest_progress(user_id: int, chat_id: int, quest_type: str, progress: int):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('UPDATE quests SET progress = ? WHERE user_id = ? AND chat_id = ? AND quest_type = ?', (progress, user_id, chat_id, quest_type))
+    cursor.execute('UPDATE quests SET progress = ? WHERE user_id = ? AND chat_id = ? AND quest_type = ?',
+                   (progress, user_id, chat_id, quest_type))
     conn.commit()
     conn.close()
+
 
 def complete_quest_db(user_id: int, chat_id: int, quest_type: str):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('UPDATE quests SET completed = 1, progress = target WHERE user_id = ? AND chat_id = ? AND quest_type = ?', (user_id, chat_id, quest_type))
+    cursor.execute(
+        'UPDATE quests SET completed = 1, progress = target WHERE user_id = ? AND chat_id = ? AND quest_type = ?',
+        (user_id, chat_id, quest_type))
     conn.commit()
     conn.close()
+
 
 def get_shop():
     conn = sqlite3.connect(DB_NAME)
@@ -448,6 +478,7 @@ def get_shop():
     rows = cursor.fetchall()
     conn.close()
     return rows
+
 
 def buy_item(user_id: int, chat_id: int, item_name: str) -> bool:
     conn = sqlite3.connect(DB_NAME)
@@ -470,11 +501,13 @@ def buy_item(user_id: int, chat_id: int, item_name: str) -> bool:
     conn.close()
     return True
 
+
 def reset_user(user_id: int, chat_id: int):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
-        cursor.execute('DELETE FROM marriages WHERE user1 = ? OR user2 = ?', (user_id, user_id))
+        cursor.execute('DELETE FROM marriages WHERE (user1 = ? OR user2 = ?) AND chat_id = ?',
+                       (user_id, user_id, chat_id))
         cursor.execute('DELETE FROM users WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
         cursor.execute('DELETE FROM quests WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
         conn.commit()
@@ -483,6 +516,7 @@ def reset_user(user_id: int, chat_id: int):
         conn.rollback()
     finally:
         conn.close()
+
 
 # --- КОМАНДЫ ---
 
@@ -509,8 +543,10 @@ WELCOME_MSG = (
     "💬 *Совет:* Чем дольше вы вместе, тем выше уровень семьи и больше бонусов!"
 )
 
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(escape_md(WELCOME_MSG), parse_mode='MarkdownV2')
+
 
 # --- /marry ---
 async def marry(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -526,7 +562,8 @@ async def marry(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args and not update.message.reply_to_message:
-        await update.message.reply_text(escape_md("Используй: /marry и ответь на сообщение пользователя."), parse_mode='MarkdownV2')
+        await update.message.reply_text(escape_md("Используй: /marry и ответь на сообщение пользователя."),
+                                        parse_mode='MarkdownV2')
         return
 
     target_user = update.message.reply_to_message.from_user
@@ -541,7 +578,8 @@ async def marry(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not can_propose(user_id, chat_id):
-        await update.message.reply_text(escape_md("Подожди 5 минут перед следующим предложением."), parse_mode='MarkdownV2')
+        await update.message.reply_text(escape_md("Подожди 5 минут перед следующим предложением."),
+                                        parse_mode='MarkdownV2')
         return
 
     update_proposal_time(user_id, chat_id)
@@ -556,6 +594,7 @@ async def marry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = f"💍 {sender_name} делает предложение {receiver_name}!\nСогласен(-на)?"
     await update.message.reply_text(escape_md(text), reply_markup=reply_markup, parse_mode='MarkdownV2')
+
 
 async def marry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -585,6 +624,7 @@ async def marry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
 
+
 # --- /reset ---
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -604,6 +644,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Ты уверен?"
     )
     await update.message.reply_text(escape_md(text), reply_markup=reply_markup, parse_mode='MarkdownV2')
+
 
 async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -626,8 +667,10 @@ async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     reset_user(user_id, chat_id)
-    await query.edit_message_text(escape_md("✅ Твой прогресс сброшен. Добро пожаловать в новую жизнь!"), parse_mode='MarkdownV2')
+    await query.edit_message_text(escape_md("✅ Твой прогресс сброшен. Добро пожаловать в новую жизнь!"),
+                                  parse_mode='MarkdownV2')
     await query.answer()
+
 
 # --- /work ---
 async def work(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -659,7 +702,8 @@ async def work(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_family_budget(user_id, chat_id, passive)
         event += f"\n🏠 Пассивный доход: +{passive}"
 
-    new_streak = user[1] + 1 if last_work and datetime.now() - datetime.fromisoformat(last_work) < timedelta(days=1) else 1
+    new_streak = user[1] + 1 if last_work and datetime.now() - datetime.fromisoformat(last_work) < timedelta(
+        days=1) else 1
     new_total = total_works + 1
     update_work_stats(user_id, chat_id, new_streak, new_total)
     update_family_budget(user_id, chat_id, salary)
@@ -680,6 +724,7 @@ async def work(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='MarkdownV2'
     )
 
+
 # --- /quests ---
 async def quests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -690,7 +735,8 @@ async def quests(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('SELECT quest_type, progress, completed, target FROM quests WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+    cursor.execute('SELECT quest_type, progress, completed, target FROM quests WHERE user_id = ? AND chat_id = ?',
+                   (user_id, chat_id))
     rows = cursor.fetchall()
     conn.close()
 
@@ -707,6 +753,7 @@ async def quests(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(escape_md(text), parse_mode='MarkdownV2')
 
+
 # --- /shop ---
 async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     items = get_shop()
@@ -716,6 +763,7 @@ async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{emoji} *{name}* — `{price}` монет\n{desc}\n\n"
     text += "Покупай: `/buy Название`"
     await update.message.reply_text(escape_md(text), parse_mode='MarkdownV2')
+
 
 # --- /buy ---
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -732,6 +780,7 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(escape_md(f"💼 Теперь ты {item_name}!"), parse_mode='MarkdownV2')
     else:
         await update.message.reply_text(escape_md("❌ Не хватает денег или нет такого."), parse_mode='MarkdownV2')
+
 
 # --- /profile ---
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -771,6 +820,7 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(escape_md(text), parse_mode='MarkdownV2')
 
+
 # --- /daily ---
 async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -792,193 +842,230 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if get_family_budget(user_id, chat_id) >= 1000:
         amount = 100
 
-    update_family_budget(user_id, chat_id, amount)
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('UPDATE marriages SET last_daily = datetime("now") WHERE (user1 = ? OR user2 = ?) AND chat_id = ?', (user_id, user_id, chat_id))
-    conn.commit()
-    conn.close()
+        update_family_budget(user_id, chat_id, amount)
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE marriages SET last_daily = datetime("now") WHERE (user1 = ? OR user2 = ?) AND chat_id = ?',
+            (user_id, user_id, chat_id))
+        conn.commit()
+        conn.close()
 
-    new_level, title, level_up = update_family_level(user_id, chat_id)
-    bonus = f"\n🎉 Повышен до уровня {new_level}: {title}!" if level_up else ""
+        new_level, title, level_up = update_family_level(user_id, chat_id)
+        bonus = f"\n🎉 Повышен до уровня {new_level}: {title}!" if level_up else ""
 
-    await update.message.reply_text(escape_md(f"🎁 Ежедневный бонус: +{amount} монет!{bonus}"), parse_mode='MarkdownV2')
+        await update.message.reply_text(escape_md(f"🎁 Ежедневный бонус: +{amount} монет!{bonus}"),
+                                        parse_mode='MarkdownV2')
 
-# --- /casino ---
-async def casino(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if not is_married(user_id, chat_id):
-        await update.message.reply_text(escape_md("Только для супругов!"), parse_mode='MarkdownV2')
-        return
+    # --- /casino ---
+    async def casino(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        if not is_married(user_id, chat_id):
+            await update.message.reply_text(escape_md("Только для супругов!"), parse_mode='MarkdownV2')
+            return
 
-    if not context.args or len(context.args) != 1:
-        await update.message.reply_text(escape_md("Используй: /casino <сумма>"), parse_mode='MarkdownV2')
-        return
+        if not context.args or len(context.args) != 1:
+            await update.message.reply_text(escape_md("Используй: /casino <сумма>"), parse_mode='MarkdownV2')
+            return
 
-    try:
-        bet = int(context.args[0])
-    except:
-        await update.message.reply_text(escape_md("Введите число."), parse_mode='MarkdownV2')
-        return
+        try:
+            bet = int(context.args[0])
+        except:
+            await update.message.reply_text(escape_md("Введите число."), parse_mode='MarkdownV2')
+            return
 
-    budget = get_family_budget(user_id, chat_id)
-    if bet > budget:
-        await update.message.reply_text(escape_md("Недостаточно монет!"), parse_mode='MarkdownV2')
-        return
-    if bet < 10:
-        await update.message.reply_text(escape_md("Минимальная ставка — 10."), parse_mode='MarkdownV2')
-        return
+        budget = get_family_budget(user_id, chat_id)
+        if bet > budget:
+            await update.message.reply_text(escape_md("Недостаточно монет!"), parse_mode='MarkdownV2')
+            return
+        if bet < 10:
+            await update.message.reply_text(escape_md("Минимальная ставка — 10."), parse_mode='MarkdownV2')
+            return
 
-    if random.random() < 0.6:
-        win = bet * 2
-        update_family_budget(user_id, chat_id, win - bet)
-        result = f"🎉 Вы выиграли {win} монет!"
-    else:
-        update_family_budget(user_id, chat_id, -bet)
-        result = f"💸 Проиграли {bet} монет..."
+        if random.random() < 0.6:
+            win = bet * 2
+            update_family_budget(user_id, chat_id, win - bet)
+            result = f"🎉 Вы выиграли {win} монет!"
+        else:
+            update_family_budget(user_id, chat_id, -bet)
+            result = f"💸 Проиграли {bet} монет..."
 
-    await update.message.reply_text(escape_md(f"🎲 Казино: {result}"), parse_mode='MarkdownV2')
+        await update.message.reply_text(escape_md(f"🎲 Казино: {result}"), parse_mode='MarkdownV2')
 
-# --- /gift ---
-async def gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    marriage = is_married(user_id, chat_id)
-    if not marriage:
-        await update.message.reply_text(escape_md("Ты не в браке!"), parse_mode='MarkdownV2')
-        return
+    # --- /gift ---
+    async def gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        marriage = is_married(user_id, chat_id)
+        if not marriage:
+            await update.message.reply_text(escape_md("Ты не в браке!"), parse_mode='MarkdownV2')
+            return
 
-    if not context.args:
-        await update.message.reply_text(escape_md("Используй: /gift Кольцо"), parse_mode='MarkdownV2')
-        return
+        if not context.args:
+            await update.message.reply_text(escape_md("Используй: /gift Кольцо"), parse_mode='MarkdownV2')
+            return
 
-    item_name = " ".join(context.args)
-    if item_name != "Кольцо":
-        await update.message.reply_text(escape_md("Пока можно дарить только Кольцо (150 монет)."), parse_mode='MarkdownV2')
-        return
+        item_name = " ".join(context.args)
+        if item_name != "Кольцо":
+            await update.message.reply_text(escape_md("Пока можно дарить только Кольцо (150 монет)."),
+                                            parse_mode='MarkdownV2')
+            return
 
-    if get_family_budget(user_id, chat_id) < 150:
-        await update.message.reply_text(escape_md("Недостаточно монет!"), parse_mode='MarkdownV2')
-        return
+        if get_family_budget(user_id, chat_id) < 150:
+            await update.message.reply_text(escape_md("Недостаточно монет!"), parse_mode='MarkdownV2')
+            return
 
-    update_family_budget(user_id, chat_id, -150)
-    partner_id = marriage[1] if marriage[0] == user_id else marriage[0]
-    sender = await get_name(update, user_id)
-    receiver = await get_name(update, partner_id)
-    await update.message.reply_text(escape_md(f"🎁 {sender} подарил(а) кольцо {receiver}! 💍"), parse_mode='MarkdownV2')
+        update_family_budget(user_id, chat_id, -150)
+        partner_id = marriage[1] if marriage[0] == user_id else marriage[0]
+        sender = await get_name(update, user_id)
+        receiver = await get_name(update, partner_id)
+        await update.message.reply_text(escape_md(f"🎁 {sender} подарил(а) кольцо {receiver}! 💍"),
+                                        parse_mode='MarkdownV2')
 
-# --- /child ---
-async def child(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    marriage = is_married(user_id, chat_id)
-    if not marriage:
-        await update.message.reply_text(escape_md("Только для супругов!"), parse_mode='MarkdownV2')
-        return
+    # --- /child ---
+    async def child(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        marriage = is_married(user_id, chat_id)
+        if not marriage:
+            await update.message.reply_text(escape_md("Только для супругов!"), parse_mode='MarkdownV2')
+            return
 
-    kids = count_children(user_id, chat_id)
-    if kids >= 5:
-        await update.message.reply_text(escape_md("У вас уже много детей!"), parse_mode='MarkdownV2')
-        return
+        kids = count_children(user_id, chat_id)
+        if kids >= 5:
+            await update.message.reply_text(escape_md("У вас уже много детей!"), parse_mode='MarkdownV2')
+            return
 
-    if get_family_budget(user_id, chat_id) < 100:
-        await update.message.reply_text(escape_md("Нужно 100 монет на воспитание!"), parse_mode='MarkdownV2')
-        return
+        if get_family_budget(user_id, chat_id) < 100:
+            await update.message.reply_text(escape_md("Нужно 100 монет на воспитание!"), parse_mode='MarkdownV2')
+            return
 
-    update_family_budget(user_id, chat_id, -100)
-    u1, u2 = marriage[0], marriage[1]
-    name = f"Ребёнок-{random.randint(100, 999)}"
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO children (parent1, parent2, chat_id, name)
-        VALUES (?, ?, ?, ?)
-    ''', (u1, u2, chat_id, name))
-    conn.commit()
-    conn.close()
+        update_family_budget(user_id, chat_id, -100)
+        u1, u2 = marriage[0], marriage[1]
+        name = f"Ребёнок-{random.randint(100, 999)}"
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO children (parent1, parent2, chat_id, name)
+            VALUES (?, ?, ?, ?)
+        ''', (u1, u2, chat_id, name))
+        conn.commit()
+        conn.close()
 
-    if get_quest(user_id, chat_id, "have_child") and not get_quest(user_id, chat_id, "have_child")[1]:
-        reward = QUESTS_INFO["have_child"]["reward"]
-        update_family_budget(user_id, chat_id, reward)
-        complete_quest_db(user_id, chat_id, "have_child")
-        await update.message.reply_text(escape_md(f"👶 У вас родился {name}!\n🏆 Квест завершён! +{reward} монет!"), parse_mode='MarkdownV2')
-    else:
-        await update.message.reply_text(escape_md(f"👶 У вас родился {name}!"), parse_mode='MarkdownV2')
+        if get_quest(user_id, chat_id, "have_child") and not get_quest(user_id, chat_id, "have_child")[1]:
+            reward = QUESTS_INFO["have_child"]["reward"]
+            update_family_budget(user_id, chat_id, reward)
+            complete_quest_db(user_id, chat_id, "have_child")
+            await update.message.reply_text(escape_md(f"👶 У вас родился {name}!\n🏆 Квест завершён! +{reward} монет!"),
+                                            parse_mode='MarkdownV2')
+        else:
+            await update.message.reply_text(escape_md(f"👶 У вас родился {name}!"), parse_mode='MarkdownV2')
 
-# --- /divorce ---
-async def divorce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if not is_married(user_id, chat_id):
-        await update.message.reply_text(escape_md("Ты и так свободен!"), parse_mode='MarkdownV2')
-        return
+    # --- /divorce ---
+    async def divorce_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        if not is_married(user_id, chat_id):
+            await update.message.reply_text(escape_md("Ты и так свободен!"), parse_mode='MarkdownV2')
+            return
 
-    divorce(user_id, chat_id)
-    await update.message.reply_text(escape_md("💔 Вы развелись..."), parse_mode='MarkdownV2')
+        divorce(user_id, chat_id)
+        await update.message.reply_text(escape_md("💔 Вы развелись..."), parse_mode='MarkdownV2')
 
+    # --- Регистрация обработчиков ---
+    def register_handlers():
+        telegram_app.add_handler(CommandHandler("start", start))
+        telegram_app.add_handler(CommandHandler("marry", marry))
+        telegram_app.add_handler(CommandHandler("work", work))
+        telegram_app.add_handler(CommandHandler("quests", quests))
+        telegram_app.add_handler(CommandHandler("shop", shop))
+        telegram_app.add_handler(CommandHandler("buy", buy))
+        telegram_app.add_handler(CommandHandler("profile", profile))
+        telegram_app.add_handler(CommandHandler("daily", daily))
+        telegram_app.add_handler(CommandHandler("casino", casino))
+        telegram_app.add_handler(CommandHandler("gift", gift))
+        telegram_app.add_handler(CommandHandler("child", child))
+        telegram_app.add_handler(CommandHandler("divorce", divorce_cmd))
+        telegram_app.add_handler(CommandHandler("reset", reset))
 
-# --- Регистрация обработчиков ---
-def register_handlers():
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("marry", marry))
-    telegram_app.add_handler(CommandHandler("work", work))
-    telegram_app.add_handler(CommandHandler("quests", quests))
-    telegram_app.add_handler(CommandHandler("shop", shop))
-    telegram_app.add_handler(CommandHandler("buy", buy))
-    telegram_app.add_handler(CommandHandler("profile", profile))
-    telegram_app.add_handler(CommandHandler("daily", daily))
-    telegram_app.add_handler(CommandHandler("casino", casino))
-    telegram_app.add_handler(CommandHandler("gift", gift))
-    telegram_app.add_handler(CommandHandler("child", child))
-    telegram_app.add_handler(CommandHandler("divorce", divorce_cmd))
-    telegram_app.add_handler(CommandHandler("reset", reset))
+        telegram_app.add_handler(CallbackQueryHandler(marry_callback, pattern=r"^marry_"))
+        telegram_app.add_handler(CallbackQueryHandler(reset_callback, pattern=r"^reset_"))
 
-    telegram_app.add_handler(CallbackQueryHandler(marry_callback, pattern=r"^marry_"))
-    telegram_app.add_handler(CallbackQueryHandler(reset_callback, pattern=r"^reset_"))
+    # --- Webhook ---
+    @app.route('/webhook', methods=['POST'])
+    def webhook():
+        try:
+            json_data = request.get_json()
+            if not json_data:
+                return 'OK', 200
 
+            # Создаем Update объект
+            update = Update.de_json(json_data, telegram_app.bot)
 
-# --- Webhook ---
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    json_data = request.get_json()
-    if not json_data:
-        return 'OK', 200
-    update = Update.de_json(json_data, telegram_app.bot)
-    # Безопасно отправляем в уже запущенный loop
-    asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), bot_loop)
-    return 'OK', 200
+            # Обрабатываем update в event loop
+            asyncio.run_coroutine_threadsafe(
+                telegram_app.process_update(update),
+                bot_loop
+            )
+            return 'OK', 200
+        except Exception as e:
+            logger.error(f"Ошибка в webhook: {e}")
+            return 'ERROR', 500
 
+    @app.route('/', methods=['GET'])
+    def home():
+        return '✅ Marriage Bot is running!', 200
 
-@app.route('/', methods=['GET'])
-def home():
-    return '✅ Marriage Bot is running!', 200
+    # --- Установка webhook ---
+    def set_webhook():
+        hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
+        if hostname:
+            url = f"https://{hostname}/webhook"
+            logger.info(f"Setting webhook: {url}")
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    telegram_app.bot.set_webhook(url=url),
+                    bot_loop
+                )
+                future.result(timeout=10)  # Ждём завершения с таймаутом
+                logger.info("✅ Webhook установлен!")
+            except Exception as e:
+                logger.error(f"❌ Ошибка установки webhook: {e}")
+        else:
+            logger.warning("⚠️ RENDER_EXTERNAL_HOSTNAME не задан — webhook не установлен.")
 
+    # --- Graceful shutdown ---
+    def shutdown():
+        logger.info("🛑 Остановка бота...")
+        if telegram_app and telegram_app.running:
+            bot_loop.run_until_complete(telegram_app.stop())
+            bot_loop.run_until_complete(telegram_app.shutdown())
+        logger.info("✅ Бот остановлен")
 
-# --- Установка webhook ---
-def set_webhook():
-    hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
-    if hostname:
-        url = f"https://{hostname}/webhook"
-        logger.info(f"Setting webhook: {url}")
-        future = asyncio.run_coroutine_threadsafe(telegram_app.bot.set_webhook(url=url), bot_loop)
-        future.result()  # Ждём завершения
-        logger.info("✅ Webhook установлен!")
-    else:
-        logger.warning("⚠️ RENDER_EXTERNAL_HOSTNAME не задан — webhook не установлен.")
+    # --- Запуск ---
+    if __name__ == '__main__':
+        try:
+            # 1. Инициализация БД
+            logger.info("🔄 Инициализация базы данных...")
+            init_db()
 
+            # 2. Инициализация Telegram приложения
+            logger.info("🔄 Инициализация Telegram приложения...")
+            init_telegram_app()
 
-# --- Запуск ---
-if __name__ == '__main__':
-    # 1. Инициализация БД
-    init_db()
+            # 3. Установка webhook
+            logger.info("🔄 Установка webhook...")
+            set_webhook()
 
-    # 2. Регистрация команд
-    register_handlers()
+            # 4. Запуск Flask
+            logger.info("🚀 Запуск Flask приложения...")
+            port = int(os.environ.get("PORT", 10000))
+            app.run(host='0.0.0.0', port=port, debug=False)
 
-    # 3. Установка webhook
-    set_webhook()
-
-    # 4. Запуск Flask
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка при запуске: {e}")
+            shutdown()
+        except KeyboardInterrupt:
+            logger.info("🛑 Получен сигнал прерывания...")
+            shutdown()
