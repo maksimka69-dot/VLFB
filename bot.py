@@ -918,11 +918,20 @@ def register_handlers():
     telegram_app.add_handler(CallbackQueryHandler(marry_callback, pattern=r"^marry_"))
     telegram_app.add_handler(CallbackQueryHandler(reset_callback, pattern=r"^reset_"))
 
-# --- Webhook endpoint (БЕЗ токена в URL!) ---
+# --- Webhook endpoint (обрабатываем сразу!) ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    telegram_app.update_queue.put_nowait(update)
+    # Получаем JSON от Telegram
+    json_data = request.get_json()
+    if json_data is None:
+        return 'OK', 200
+
+    # Преобразуем в объект Update
+    update = Update.de_json(json_data, telegram_app.bot)
+
+    # Обрабатываем обновление СРАЗУ (синхронно)
+    asyncio.run(telegram_app.process_update(update))
+
     return 'OK', 200
 
 # --- Health check ---
@@ -930,7 +939,7 @@ def webhook():
 def home():
     return 'Marriage Bot is running on Render! ✅', 200
 
-# --- Установка webhook (БЕЗ токена в URL!) ---
+# --- Установка webhook ---
 def set_webhook():
     hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
     if not hostname:
@@ -940,29 +949,10 @@ def set_webhook():
     logger.info(f"Setting webhook to: {webhook_url}")
     asyncio.run(telegram_app.bot.set_webhook(url=webhook_url))
 
-# --- Фоновый запуск telegram_app ---
-def run_telegram_app():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(telegram_app.initialize())
-        loop.run_until_complete(telegram_app.start())
-        loop.run_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        loop.run_until_complete(telegram_app.stop())
-        loop.run_until_complete(telegram_app.shutdown())
-        loop.close()
-
 # --- Запуск приложения ---
 if __name__ == '__main__':
     init_db()
     register_handlers()
-
-    # Запускаем Telegram-приложение в фоновом потоке
-    telegram_thread = threading.Thread(target=run_telegram_app, daemon=True)
-    telegram_thread.start()
 
     # Устанавливаем webhook
     set_webhook()
